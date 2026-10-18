@@ -23,6 +23,9 @@ export interface SavedItinerary {
   ai_explanation?: string;
   // 'log' = shown from Airtable Itinerary_Log (generated, not saved to My Saved Trips in Firestore)
   source?: 'saved' | 'log';
+  // Set when the bias kill switch was on and the plan landed on a popular destination for an
+  // open-ended request (Part 4, 4.5 Contain): the plan cannot be shared publicly.
+  share_disabled?: boolean;
 }
 
 export interface ChatMessage {
@@ -55,6 +58,7 @@ export interface ChatMessage {
   itineraryJson?: any;
   ai_explanation?: string;
   itineraryLogId?: string;
+  shareDisabled?: boolean;
   isError?: boolean;
   retryPrompt?: string;
   badges?: string[];

@@ -103,6 +103,26 @@ export interface ChatResponsePayload {
   itineraryJson?: GeneratedItineraryJson;
   slots?: ExtractedSlots;
   badges?: string[];
+  // Bias monitoring (Part 4, 4.5 Detect): written to Itinerary_Log so DDS can be computed per day.
+  bias?: BiasSignals;
+  // Contain: when the kill switch is on, plans that still land on a popular destination for an
+  // open-ended request are not shareable.
+  shareDisabled?: boolean;
+}
+
+export interface BiasSignals {
+  destination_named: boolean;
+  popularity_tier: string | null;
+  shortlist_destination_ids: string[];
+  shortlist_slots: number;
+  shortlist_nonpopular_slots: number;
+  eligible_nonpopular_share: number | null;
+  kill_switch: boolean;
+}
+
+/** Contain step of the 4.5 incident playbook: BIAS_KILL_SWITCH=on on the server. */
+export function isBiasKillSwitchOn(): boolean {
+  return String(process.env.BIAS_KILL_SWITCH || '').trim().toLowerCase() === 'on';
 }
 
 const INDIAN_STATES = new Set([
@@ -2216,6 +2236,29 @@ export async function processChatWithGemini(
     }
   }
 
+  // A request is open-ended unless it names a catalogue destination (a country or region alone is open-ended).
+  const msgLower = cleanText.toLowerCase();
+  const destinationNamed = catalogue.destinations.some(d => d.destination_name && msgLower.includes(d.destination_name.toLowerCase()));
+  const isNonPopular = (t?: string) => ['known', 'offbeat'].includes((t || '').toLowerCase());
+  const killSwitch = isBiasKillSwitchOn();
+
+  // Kill switch (4.5 Contain): for open-ended requests, never lead with a popular destination when a
+  // known or offbeat one passes the same filters and fits the budget.
+  if (killSwitch && !destinationNamed && !isNonPopular(primaryDest.popularity_tier)) {
+    const candidates = [...shortlistDestinations.slice(1), ...ranked.rankedDestinations]
+      .filter((d, i, arr) => arr.findIndex(x => x.destination_id === d.destination_id) === i)
+      .filter(d => isNonPopular(d.popularity_tier) && d.destination_id !== primaryDest.destination_id)
+      .map(d => ({ dest: d, facts: destBudgetFacts(d) }))
+      .filter(c => c.facts.floorCost <= userBudget && (!requiresElder || c.facts.eligible.length > 0));
+    if (candidates.length > 0) {
+      const alt = candidates[0];
+      console.log(`[Bias Kill Switch] Replacing popular ${primaryDest.destination_name} with ${alt.dest.destination_name}.`);
+      shortlistDestinations = [alt.dest, ...shortlistDestinations.filter(d => d.destination_id !== alt.dest.destination_id)];
+      primaryDest = alt.dest;
+      facts = alt.facts;
+    }
+  }
+
   const pool = facts.pool;
   const eligibleHotelsForDest = facts.eligible;
   const cheapestEligibleHotel = facts.cheapest;
@@ -2521,7 +2564,29 @@ export async function processChatWithGemini(
     cheapestOptionNote
   );
 
+  // Bias signals for the Itinerary_Log (DDS = non-popular shortlist slots ÷ all slots, open-ended requests only).
+  const destById = new Map(catalogue.destinations.map(d => [d.destination_id, d]));
+  const chosenDest = destById.get(itineraryJson.destination_id) || primaryDest;
+  const slotIds = [chosenDest.destination_id, ...(itineraryJson.alternatives || []).map(a => a.destination_id)]
+    .filter((id, i, arr) => id && arr.indexOf(id) === i);
+  const slotTiers = slotIds.map(id => destById.get(id)?.popularity_tier);
+  const rankedPool = ranked.rankedDestinations;
+  const bias: BiasSignals = {
+    destination_named: destinationNamed,
+    popularity_tier: chosenDest.popularity_tier || null,
+    shortlist_destination_ids: slotIds,
+    shortlist_slots: slotIds.length,
+    shortlist_nonpopular_slots: slotTiers.filter(t => isNonPopular(t)).length,
+    eligible_nonpopular_share: rankedPool.length > 0
+      ? Math.round((rankedPool.filter(d => isNonPopular(d.popularity_tier)).length / rankedPool.length) * 100) / 100
+      : null,
+    kill_switch: killSwitch
+  };
+  const shareDisabled = killSwitch && !destinationNamed && !isNonPopular(chosenDest.popularity_tier);
+
   return {
+    bias,
+    shareDisabled,
     responseText: markdown,
     destinationIds: shortlistDestinations.map(d => d.destination_id),
     matchedDestinations: shortlistDestinations,

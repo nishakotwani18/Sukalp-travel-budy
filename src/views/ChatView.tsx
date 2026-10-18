@@ -279,6 +279,7 @@ export const ChatView: React.FC<ChatViewProps> = ({ onSavedItinerary }) => {
         saved: false,
         itineraryJson: data?.itineraryJson || null,
         itineraryLogId: data?.itinerary_id || undefined,
+        shareDisabled: Boolean(data?.shareDisabled),
         badges: data?.badges || []
       };
 
@@ -392,7 +393,8 @@ export const ChatView: React.FC<ChatViewProps> = ({ onSavedItinerary }) => {
       nights: nightsVal,
       review_status: reviewStatusVal,
       created_at: createdAtIso,
-      itinerary_json: message.itineraryJson || null
+      itinerary_json: message.itineraryJson || null,
+      share_disabled: Boolean(message.shareDisabled)
     };
 
     try {
