@@ -278,6 +278,7 @@ export const ChatView: React.FC<ChatViewProps> = ({ onSavedItinerary }) => {
         matchedHotels: data?.matchedHotels || [],
         saved: false,
         itineraryJson: data?.itineraryJson || null,
+        itineraryLogId: data?.itinerary_id || undefined,
         badges: data?.badges || []
       };
 
@@ -364,7 +365,9 @@ export const ChatView: React.FC<ChatViewProps> = ({ onSavedItinerary }) => {
       prev.map(m => (m.id === message.id ? { ...m, isSaving: true } : m))
     );
 
-    const itineraryId = `itin_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+    // Use the id the server already logged to Airtable at generation time, so the saved trip and its
+    // Itinerary_Log row share one id (My Saved Trips reads review status by this id).
+    const itineraryId = message.itineraryLogId || `itin_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
     const humanDestName = message.itineraryJson?.destination_name ||
       message.matchedDestinations?.[0]?.name ||
       message.matchedDestinations?.[0]?.destination_name ||

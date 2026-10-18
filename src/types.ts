@@ -52,6 +52,7 @@ export interface ChatMessage {
   saved?: boolean;
   itineraryJson?: any;
   ai_explanation?: string;
+  itineraryLogId?: string;
   isError?: boolean;
   retryPrompt?: string;
   badges?: string[];

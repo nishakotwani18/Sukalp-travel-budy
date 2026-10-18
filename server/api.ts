@@ -2,7 +2,7 @@ import { IncomingMessage, ServerResponse } from 'http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { getCatalogueData, forwardItineraryToN8n } from './airtable.ts';
+import { getCatalogueData, logGeneratedItinerary } from './airtable.ts';
 import { processChatWithGemini } from './gemini.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -198,36 +198,33 @@ export async function handleApiRequest(
 
       const result = await processChatWithGemini(message, sanitizedProfile);
 
-      // Requirement 6: Webhook to n8n fires after every successful generation (fire-and-forget, 5s timeout)
-      const humanDestName = result.itineraryJson?.destination_name || result.matchedDestinations?.[0]?.destination_name || 'Lansdowne';
-      const slotsTravellerType = result.slots?.traveller_type || 'couple';
-      const profileTravellerType = sanitizedProfile?.traveller_type || slotsTravellerType;
-      const accessibilityNeed = result.slots?.accessibility || sanitizedProfile?.accessibility_need || 'none';
-      const totalCost = result.itineraryJson?.cost?.total_inr || 0;
+      // Every successfully generated itinerary is logged to Airtable Itinerary_Log immediately
+      // (Review Status = Pending). The app no longer calls n8n: an Airtable automation on
+      // "record created" sends the new row to the n8n webhook, which writes the AI Explanation back.
+      let itineraryId: string | null = null;
+      if (result.itineraryJson) {
+        itineraryId = `itin_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        const ij: any = result.itineraryJson;
+        const destName = ij?.destination_name || result.matchedDestinations?.[0]?.destination_name || 'Custom Getaway';
+        await logGeneratedItinerary({
+          itinerary_id: itineraryId,
+          user_id: auth.uid,
+          trip_request: message,
+          generated_recommendation: result.responseText,
+          destination_name: destName,
+          nights: ij?.dates?.nights || result.slots?.nights || null,
+          traveller_type: result.slots?.traveller_type || sanitizedProfile?.traveller_type || 'traveller',
+          accessibility_need: result.slots?.accessibility || sanitizedProfile?.accessibility_need || 'none',
+          estimated_cost: ij?.cost?.total_inr || 0,
+          evidence_source_reviews: (ij?.evidence || []).map((e: any) => e.review_id).join(', '),
+          assumptions: (ij?.assumptions || []).join('; '),
+          alternatives: (ij?.alternatives || []).map((a: any) => a.destination_name).join(', '),
+          safety_notes: ij?.safety_notes || '',
+          vegetarian_notes: ij?.food_notes || ''
+        });
+      }
 
-      forwardItineraryToN8n({
-        event: 'generated',
-        trip_request: message,
-        generated_recommendation: result.responseText,
-        destination_name: humanDestName,
-        traveller_type: slotsTravellerType,
-        profile_traveller_type: profileTravellerType,
-        accessibility_need: accessibilityNeed,
-        estimated_cost: totalCost,
-        user_id: auth.uid,
-        itinerary_summary: `${humanDestName} · ₹${totalCost.toLocaleString('en-IN')} total · ${slotsTravellerType}`,
-        ai_explanation: '',
-        evidence_source_reviews: (result.itineraryJson?.evidence || []).map(e => e.review_id).join(', '),
-        safety_notes: result.itineraryJson?.safety_notes || '',
-        cleanliness_notes: '',
-        vegetarian_notes: result.itineraryJson?.food_notes || '',
-        assumptions: (result.itineraryJson?.assumptions || []).join('; '),
-        alternatives: (result.itineraryJson?.alternatives || []).map(a => a.destination_name).join(', ')
-      }).catch(err => {
-        console.warn('[n8n generation webhook notice]:', err?.message);
-      });
-
-      sendJson(res, 200, result);
+      sendJson(res, 200, { ...result, itinerary_id: itineraryId });
       return true;
     }
 
@@ -264,50 +261,9 @@ export async function handleApiRequest(
         return true;
       }
 
-      const evidence = pickEvidence(body);
-      const tripRequest = fieldString(fields, 'request_text') || String(body.trip_request || '');
-      const itineraryText = fieldString(fields, 'response_text') || String(body.itinerary_text || '');
-      const totalInr = Number(body.total_inr) || 0;
-      const travellerType = String(body.traveller_type || 'traveller').slice(0, 30);
-
-      // Requirement 6: destination_name must be the human name, NOT IDs like "D11, D06, D07"
-      let destName = String(body.destination_name || fieldString(fields, 'destination_name') || '');
-      if (!destName || /^D\d+/.test(destName) || destName === 'verified_catalogue_spots') {
-        const destMatch = itineraryText.match(/### 1\. Trip Overview:\s*([^\n\r]+)/) ||
-                          itineraryText.match(/\*\s*\*\*Destination:\*\*\s*\*\*([^*]+)\*\*/);
-        destName = destMatch ? destMatch[1].trim() : (fieldString(fields, 'destination_ids') || 'Custom Getaway');
-      }
-
-      const summary = `${destName} · ₹${totalInr.toLocaleString('en-IN')} total · ${travellerType}`;
-
-      const queued = await forwardItineraryToN8n({
-        event: 'saved',
-        itinerary_id: itineraryId,
-        trip_request: tripRequest,
-        generated_recommendation: itineraryText,
-        evidence_source_reviews: evidence.evidence_source_reviews || '',
-        estimated_cost: totalInr,
-        estimated_travel_time: evidence.estimated_travel_time || '',
-        assumptions: evidence.assumptions || '',
-        alternatives: evidence.alternatives || '',
-        safety_notes: evidence.safety_notes || '',
-        cleanliness_notes: evidence.cleanliness_notes || '',
-        vegetarian_notes: evidence.vegetarian_notes || '',
-        user_id: auth.uid,
-        itinerary_summary: summary,
-        ai_explanation: '',
-        traveller_type: travellerType,
-        profile_traveller_type: travellerType,
-        destination_name: destName,
-        accessibility_need: String(body.accessibility_need || '')
-      });
-
-      if (!queued) {
-        sendJson(res, 503, { error: 'n8n webhook is not configured' });
-        return true;
-      }
-
-      sendJson(res, 202, { status: 'queued' });
+      // The itinerary was already logged to Airtable when it was generated (same id), so saving
+      // only confirms ownership; nothing is sent to n8n from here.
+      sendJson(res, 200, { status: 'saved' });
       return true;
     }
 
