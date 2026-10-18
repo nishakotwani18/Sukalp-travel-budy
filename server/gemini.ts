@@ -1742,7 +1742,8 @@ export function verifyAndFormatOutput(
   // Canonical road travel time figure used consistently in all sections
   let roadTravelTimeFigure: string | null = canonicalTravelTime ? canonicalTravelTime.trim() : null;
   if (roadTravelTimeFigure) {
-    if (!roadTravelTimeFigure.toLowerCase().includes('road')) {
+    // Add "by road" only when the figure names no mode or start point ("1 h from ZRH by train" stays as it is)
+    if (!/\b(road|train|rail|ferry|flight|bus|metro|from)\b/i.test(roadTravelTimeFigure)) {
       roadTravelTimeFigure = `${roadTravelTimeFigure} by road`;
     }
   }
@@ -1754,10 +1755,17 @@ export function verifyAndFormatOutput(
   const timeIsFromHub = !isBengaluruToMunnar && canonicalTravelTime === (destRecord?.typical_travel_time || '') &&
     !!hubCity && !!originCity && !hubCity.toLowerCase().includes(originCity.toLowerCase());
   if (timeIsFromHub && roadTravelTimeFigure) {
-    const displayFigure = roadTravelTimeFigure.startsWith('about') || roadTravelTimeFigure.startsWith('~')
+    const displayFigure = /^(about|~)/i.test(roadTravelTimeFigure) || !/^\d/.test(roadTravelTimeFigure)
       ? roadTravelTimeFigure
       : `about ${roadTravelTimeFigure}`;
-    travelRouteNotice = `${displayFigure} from ${hubCity} to ${destName}. Getting from ${originCity} to ${hubCity} is extra and not included in the cost.`;
+    const extra = `Getting from ${originCity} to ${hubCity} is extra and not included in the cost.`;
+    // When the figure already says where it is measured from (e.g. "from VIE by train"), or the hub is the
+    // destination itself, show it as it is rather than as "from Vienna to Vienna".
+    const figureHasStart = /\bfrom\b/i.test(displayFigure);
+    const hubIsDest = destName.toLowerCase().includes(hubCity.toLowerCase()) || hubCity.toLowerCase().includes(destName.toLowerCase());
+    travelRouteNotice = figureHasStart || hubIsDest
+      ? `Travel time to ${destName}: ${displayFigure}. ${extra}`
+      : `${displayFigure} from ${hubCity} to ${destName}. ${extra}`;
   } else if (originCity && roadTravelTimeFigure) {
     const displayFigure = roadTravelTimeFigure.startsWith('about') || roadTravelTimeFigure.startsWith('~')
       ? roadTravelTimeFigure
