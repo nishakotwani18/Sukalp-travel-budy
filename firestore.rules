@@ -1,0 +1,67 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Default deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // users_profile collection (doc ID is userId)
+    match /users_profile/{userId} {
+      allow get: if isOwner(userId);
+      allow list: if isSignedIn() && resource.data.user_id == request.auth.uid;
+      allow create: if isOwner(userId) 
+        && request.resource.data.user_id == request.auth.uid
+        && request.resource.data.user_id is string;
+      allow update: if isOwner(userId)
+        && request.resource.data.user_id == request.auth.uid;
+      allow delete: if isOwner(userId);
+    }
+
+    // saved_itineraries collection
+    match /saved_itineraries/{itineraryId} {
+      allow get: if resource.data.is_public == true || (isSignedIn() && resource.data.user_id == request.auth.uid);
+      allow list: if isSignedIn() && resource.data.user_id == request.auth.uid;
+      allow create: if isSignedIn()
+        && request.resource.data.user_id == request.auth.uid
+        && request.resource.data.id is string
+        && request.resource.data.request_text is string
+        && request.resource.data.response_text is string;
+      allow update: if isSignedIn()
+        && resource.data.user_id == request.auth.uid
+        && request.resource.data.user_id == request.auth.uid;
+      allow delete: if isSignedIn() && resource.data.user_id == request.auth.uid;
+    }
+
+    // events collection: create-only, own user_id, never read back by clients
+    match /events/{eventId} {
+      allow create: if isSignedIn()
+        && request.resource.data.user_id == request.auth.uid
+        && request.resource.data.event is string
+        && request.resource.data.itinerary_id is string;
+      allow read, update, delete: if false;
+    }
+
+    // reports collection: create-only, own user_id, reason capped at 1000 chars
+    match /reports/{reportId} {
+      allow create: if isSignedIn()
+        && request.resource.data.user_id == request.auth.uid
+        && request.resource.data.reason is string
+        && request.resource.data.reason.size() <= 1000;
+      allow read, update, delete: if false;
+    }
+  }
+}

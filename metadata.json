@@ -1,0 +1,6 @@
+{
+  "name": "SUKALP AI Buddy – Plan less. Experience more.",
+  "description": "Conversational travel assistant that plans less and lets you experience more with live catalogue insights.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,46 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User preferences and settings profile",
+      "type": "object",
+      "properties": {
+        "user_id": { "type": "string", "description": "Auth UID of the user" },
+        "traveller_type": { "type": "string", "description": "e.g. Solo, Couple, Family, Friends" },
+        "budget_inr": { "type": "string", "description": "Budget in INR range or amount" },
+        "food_preference": { "type": "string", "description": "Vegetarian, Non-Vegetarian, Vegan, Jain, etc." },
+        "accessibility_need": { "type": "string", "description": "Accessibility requirements" },
+        "consent_status": { "type": "string", "description": "Consent status e.g. accepted" },
+        "updated_at": { "type": "string", "description": "ISO timestamp of last update" }
+      },
+      "required": ["user_id"]
+    },
+    "SavedItinerary": {
+      "title": "SavedItinerary",
+      "description": "Saved travel itinerary from AI recommendation",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique itinerary ID" },
+        "user_id": { "type": "string", "description": "Auth UID of the owner" },
+        "request_text": { "type": "string", "description": "User's search or prompt text" },
+        "response_text": { "type": "string", "description": "Full AI response and evidence cards" },
+        "destination_ids": { "type": "string", "description": "Comma separated or serialized destination IDs" },
+        "review_status": { "type": "string", "description": "Auto-approved (no flags) or Pending review" },
+        "created_at": { "type": "string", "description": "ISO or formatted timestamp of creation" },
+        "is_public": { "type": "boolean", "description": "Whether the itinerary is shared publicly via read-only link" },
+        "itinerary_json": { "type": "object", "description": "Structured JSON payload of the generated itinerary" }
+      },
+      "required": ["id", "user_id", "request_text", "response_text", "review_status", "created_at"]
+    }
+  },
+  "firestore": {
+    "/users_profile/{userId}": {
+      "schema": "UserProfile",
+      "description": "User profile keyed by their Firebase Auth UID"
+    },
+    "/saved_itineraries/{itineraryId}": {
+      "schema": "SavedItinerary",
+      "description": "User saved itineraries scoped to user_id"
+    }
+  }
+}
