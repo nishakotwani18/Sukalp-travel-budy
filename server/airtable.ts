@@ -481,3 +481,91 @@ export async function forwardItineraryToN8n(payload: {
     return false;
   }
 }
+
+/**
+ * Logs a newly GENERATED itinerary to Airtable Itinerary_Log straight away (before any Save click).
+ * The row is created with Review Status = Pending and an empty AI Explanation.
+ * The app does NOT call n8n: an Airtable automation on "record created" in Itinerary_Log
+ * sends the new row to the n8n webhook, and n8n writes the AI Explanation back to this row.
+ * Name = the itinerary id the app later uses as the Firestore saved-trip id, so My Saved Trips
+ * can look up the review status and approved explanation.
+ */
+export async function logGeneratedItinerary(payload: {
+  itinerary_id: string;
+  user_id: string;
+  trip_request: string;
+  generated_recommendation: string;
+  destination_name: string;
+  nights?: number | null;
+  traveller_type: string;
+  accessibility_need?: string;
+  estimated_cost: number;
+  evidence_source_reviews?: string;
+  assumptions?: string;
+  alternatives?: string;
+  safety_notes?: string;
+  vegetarian_notes?: string;
+}): Promise<string | null> {
+  const pat = process.env.AIRTABLE_PAT;
+  if (!pat) {
+    console.warn('[Airtable Log] AIRTABLE_PAT not set — generated itinerary not logged.');
+    return null;
+  }
+
+  // Persona routing: only the two target personas get a link; solo/group trips stay unlinked.
+  const PRERNA = 'rec4IqzI0niI5AzrK';
+  const ANITA = 'recXixwqDTS2cWLT8';
+  const tt = String(payload.traveller_type || '').toLowerCase();
+  const cues = `${tt} ${payload.accessibility_need || ''} ${payload.trip_request || ''}`.toLowerCase();
+  let persona: string[] = [];
+  if (tt === 'family' || /elder|parent|senior|wheelchair|limited walking|limited_walking/.test(cues)) persona = [ANITA];
+  else if (tt === 'couple') persona = [PRERNA];
+
+  const total = Number(payload.estimated_cost) || 0;
+  const summary =
+    `${payload.destination_name || 'Custom Getaway'}` +
+    `${payload.nights ? ` · ${payload.nights} nights` : ''}` +
+    `${total ? ` · ₹${total.toLocaleString('en-IN')} total` : ''}` +
+    ` · ${tt || 'traveller'}`;
+
+  const fields: Record<string, any> = {
+    fldLd8VQHcYI1UEMA: payload.itinerary_id, // Name
+    [ITINERARY_LOG_FIELD_IDS.run_timestamp]: new Date().toISOString(), // Timestamp (SLA clock starts here)
+    [ITINERARY_LOG_FIELD_IDS.user_id]: String(payload.user_id || ''),
+    [ITINERARY_LOG_FIELD_IDS.trip_request]: String(payload.trip_request || '').slice(0, 5000),
+    [ITINERARY_LOG_FIELD_IDS.generated_recommendation]: String(payload.generated_recommendation || ''),
+    [ITINERARY_LOG_FIELD_IDS.estimated_cost]: total,
+    [ITINERARY_LOG_FIELD_IDS.itinerary_summary]: summary,
+    [ITINERARY_LOG_FIELD_IDS.evidence_source_reviews]: String(payload.evidence_source_reviews || ''),
+    [ITINERARY_LOG_FIELD_IDS.assumptions]: String(payload.assumptions || ''),
+    [ITINERARY_LOG_FIELD_IDS.alternatives]: String(payload.alternatives || ''),
+    [ITINERARY_LOG_FIELD_IDS.safety_notes]: String(payload.safety_notes || ''),
+    [ITINERARY_LOG_FIELD_IDS.vegetarian_notes]: String(payload.vegetarian_notes || ''),
+    [ITINERARY_LOG_FIELD_IDS.review_status]: 'Pending'
+  };
+  if (persona.length) fields[ITINERARY_LOG_FIELD_IDS.persona] = persona;
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await fetch(`https://api.airtable.com/v0/${BASE_ID}/${ITINERARY_LOG_TABLE_ID}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${pat}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ typecast: true, records: [{ fields }] }),
+      signal: controller.signal
+    });
+    if (!res.ok) {
+      console.error('[Airtable Log] create failed', res.status, await res.text());
+      return null;
+    }
+    const data: any = await res.json();
+    const recordId = data?.records?.[0]?.id || null;
+    console.log('[Airtable Log] generated itinerary logged:', payload.itinerary_id, recordId);
+    return recordId;
+  } catch (err: any) {
+    console.error('[Airtable Log] create error:', err?.message);
+    return null;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
