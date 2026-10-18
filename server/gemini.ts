@@ -654,6 +654,7 @@ export function rankCandidates(
   eligibleHotels: Record<string, HotelRecord[]>;
   hotelReviews: Record<string, ReviewRecord[]>;
   noMatch: Array<{ name: string; minPp: number }>;
+  rankedDestinations: DestinationRecord[];
 } {
   // Compute per-person budget
   let totalBudget = slots.budget_total_inr ?? 30000;
@@ -980,7 +981,9 @@ export function rankCandidates(
     shortlistDestinations: shortlist,
     eligibleHotels: eligibleHotelsMap,
     hotelReviews: hotelReviewsMap,
-    noMatch: budgetRejects
+    noMatch: budgetRejects,
+    // Every destination that passed the hard filters (scope, region, avoid, budget, accessibility), best first
+    rankedDestinations: passingDestinations.map(p => p.dest)
   };
 }
 
@@ -1412,23 +1415,22 @@ export function verifyAndFormatOutput(
   }
 
   // Replace every mention of other hotels (and specifically Hotel Höheweg Alpine View) in the day-by-day plan and the assumptions with the selected stay
+  const escapeRe = (x: string) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const STAY_TOKEN = '\u0000STAY\u0000';
+  const otherHotelNames = allHotels
+    .map(h => h.name)
+    .filter(n => n && selectedStayName && n.toLowerCase() !== selectedStayName.toLowerCase())
+    .sort((a, b) => b.length - a.length); // longest first, so "Hotel X Y" is replaced before "X Y"
   const sanitizeStayMentions = (text: string): string => {
     if (!text || !selectedStayName) return text;
-    let res = text;
-    // Explicit replace for Hotel Höheweg Alpine View and variations
-    res = res.replace(/\bHotel\s+H[öo]heweg\s+Alpine\s+View\b/gi, selectedStayName);
-    res = res.replace(/\bH[öo]heweg\s+Alpine\s+View\b/gi, selectedStayName);
-    res = res.replace(/\bHotel\s+H[öo]heweg\b/gi, selectedStayName);
-
-    // Replace any other hotel from allHotels that might be named
-    for (const h of allHotels) {
-      if (h.name && h.name.toLowerCase() !== selectedStayName.toLowerCase()) {
-        const escaped = h.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const reg = new RegExp(`\\b${escaped}\\b`, 'gi');
-        res = res.replace(reg, selectedStayName);
-      }
+    // Protect existing mentions of the selected stay, so a replacement never rewrites the stay's own name
+    // (this produced "Hotel Hotel Höheweg Alpine View Alpine View").
+    let res = text.replace(new RegExp(escapeRe(selectedStayName), 'gi'), STAY_TOKEN);
+    for (const name of otherHotelNames) {
+      res = res.replace(new RegExp(escapeRe(name), 'gi'), STAY_TOKEN);
     }
-    return res;
+    res = res.replace(new RegExp(`${STAY_TOKEN}(\\s+${STAY_TOKEN})+`, 'g'), STAY_TOKEN);
+    return res.split(STAY_TOKEN).join(selectedStayName);
   };
 
   for (const day of itinerary.days) {
@@ -1746,7 +1748,17 @@ export function verifyAndFormatOutput(
   }
 
   let travelRouteNotice = '';
-  if (originCity && roadTravelTimeFigure) {
+  // The catalogue's typical_travel_time is measured from the destination's hub city. Only call it the
+  // time "from <origin>" when the hub is the origin (or the route is a known one); otherwise name the hub.
+  const hubCity = (destRecord?.hub_city || '').trim();
+  const timeIsFromHub = !isBengaluruToMunnar && canonicalTravelTime === (destRecord?.typical_travel_time || '') &&
+    !!hubCity && !!originCity && !hubCity.toLowerCase().includes(originCity.toLowerCase());
+  if (timeIsFromHub && roadTravelTimeFigure) {
+    const displayFigure = roadTravelTimeFigure.startsWith('about') || roadTravelTimeFigure.startsWith('~')
+      ? roadTravelTimeFigure
+      : `about ${roadTravelTimeFigure}`;
+    travelRouteNotice = `${displayFigure} from ${hubCity} to ${destName}. Getting from ${originCity} to ${hubCity} is extra and not included in the cost.`;
+  } else if (originCity && roadTravelTimeFigure) {
     const displayFigure = roadTravelTimeFigure.startsWith('about') || roadTravelTimeFigure.startsWith('~')
       ? roadTravelTimeFigure
       : `about ${roadTravelTimeFigure}`;
@@ -1934,7 +1946,6 @@ export function verifyAndFormatOutput(
 
   // 3. Stays
   lines.push(`### 3. Verified Stays`);
-  lines.push(`* _Note: Prototype catalogue data. Not a guarantee of safety, cleanliness or price._`);
   lines.push('');
   if (!itinerary.hotels || itinerary.hotels.length === 0) {
     lines.push(`* No verified evidence available for this section.`);
@@ -2310,11 +2321,12 @@ export async function processChatWithGemini(
     itin.cost.stay_inr = rooms * nights * nightlyRate;
 
     const estNonStayCalc = (isDom ? 1500 : 6000) * travellerCount * nights;
-    if (!itin.cost.local_transport_inr || !itin.cost.food_inr) {
-      itin.cost.local_transport_inr = Math.round(estNonStayCalc * 0.3);
-      itin.cost.food_inr = Math.round(estNonStayCalc * 0.5);
-      itin.cost.activities_inr = Math.round(estNonStayCalc * 0.2);
-    }
+    // The model's figures are kept only when they are at least the server's floor for the party size
+    // (30% transport, 50% food, 20% activities of ₹1,500 / ₹6,000 per person per night), so a group of
+    // five is never budgeted ₹800 for local transport.
+    itin.cost.local_transport_inr = Math.max(itin.cost.local_transport_inr || 0, Math.round(estNonStayCalc * 0.3));
+    itin.cost.food_inr = Math.max(itin.cost.food_inr || 0, Math.round(estNonStayCalc * 0.5));
+    itin.cost.activities_inr = Math.max(itin.cost.activities_inr || 0, Math.round(estNonStayCalc * 0.2));
     itin.cost.total_inr = itin.cost.stay_inr + (itin.cost.local_transport_inr || 0) + (itin.cost.food_inr || 0) + (itin.cost.activities_inr || 0);
     itin.cost.per_person_inr = travellerCount === 1 ? itin.cost.total_inr : Math.round(itin.cost.total_inr / travellerCount);
     itin.cost.within_budget = itin.cost.total_inr <= userBudget;
@@ -2444,6 +2456,47 @@ export async function processChatWithGemini(
     } catch (err) {
       console.warn('Alternatives regeneration error:', err);
     }
+  }
+
+  // Alternatives, enforced by the server: each must pass the same filters as the main plan
+  // (ranked candidates only, and an elder-friendly stay when one is required), and at least one
+  // must be "known" or "offbeat". If the model offered none that qualify, fill from the ranked list.
+  {
+    const rankedIds = new Set(ranked.rankedDestinations.map(d => d.destination_id));
+    const destOk = (d?: DestinationRecord) => !!d && d.destination_id !== primaryDest.destination_id &&
+      rankedIds.has(d.destination_id) && (!requiresElder || destBudgetFacts(d).eligible.length > 0);
+    const toAlt = (d: DestinationRecord, why?: string) => ({
+      destination_id: d.destination_id,
+      destination_name: d.destination_name,
+      popularity_tier: d.popularity_tier || 'known',
+      why: why || d.destination_description || `A verified alternative in ${d.zone || 'the region'}.`
+    });
+    const byId = new Map(catalogue.destinations.map(d => [d.destination_id, d]));
+    const byName = new Map(catalogue.destinations.map(d => [d.destination_name.trim().toLowerCase(), d]));
+    const kept = (itineraryJson.alternatives || [])
+      .map(a => ({ a, d: byId.get(a.destination_id) || byName.get((a.destination_name || '').trim().toLowerCase()) }))
+      .filter(x => destOk(x.d))
+      .map(x => toAlt(x.d!, x.a.why));
+    const isNonPopular = (t?: string) => ['known', 'offbeat'].includes((t || '').toLowerCase());
+    const pool = [...shortlistDestinations.slice(1), ...ranked.rankedDestinations]
+      .filter((d, i, arr) => arr.findIndex(x => x.destination_id === d.destination_id) === i)
+      .filter(d => destOk(d) && !kept.some(k => k.destination_id === d.destination_id));
+    if (!kept.some(k => isNonPopular(k.popularity_tier))) {
+      const np = pool.find(d => isNonPopular(d.popularity_tier));
+      if (np) kept.push(toAlt(np));
+    }
+    for (const d of pool) {
+      if (kept.length >= 2) break;
+      if (!kept.some(k => k.destination_id === d.destination_id)) kept.push(toAlt(d));
+    }
+    itineraryJson.alternatives = kept.slice(0, 3);
+  }
+
+  // Travel time is stated once, by the server, in the "Route & Travel Time" line (measured from the
+  // destination's hub city). Drop the model's own travel-time assumptions so they cannot contradict it.
+  {
+    const travelRe = /\b(by road|travel time|transit time|journey time|drive from|hours? from|h from|from the (main )?(arrival )?hub)\b/i;
+    itineraryJson.assumptions = (itineraryJson.assumptions || []).filter(a => !travelRe.test(a));
   }
 
   if (budgetSwitchNote) {
