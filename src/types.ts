@@ -21,6 +21,8 @@ export interface SavedItinerary {
   is_public?: boolean;
   itinerary_json?: any;
   ai_explanation?: string;
+  // 'log' = shown from Airtable Itinerary_Log (generated, not saved to My Saved Trips in Firestore)
+  source?: 'saved' | 'log';
 }
 
 export interface ChatMessage {
