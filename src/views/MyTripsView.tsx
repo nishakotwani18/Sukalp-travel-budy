@@ -121,28 +121,57 @@ export const MyTripsView: React.FC<MyTripsViewProps> = ({ onStartNewChat }) => {
     return () => unsubscribe();
   }, [user]);
 
-  // Requirement 8: read live reviewer status (and the approved explanation) from Airtable
+  // Itineraries logged in Airtable Itinerary_Log for this user (generated, saved or not),
+  // with each one's review status and, only when Approved, the approved explanation.
+  const [logItems, setLogItems] = useState<SavedItinerary[]>([]);
   useEffect(() => {
-    if (itineraries.length === 0 || !user) return;
+    if (!user) { setLogItems([]); return; }
     let cancelled = false;
-    const ids = itineraries.map(i => i.id).join(',');
-    (async () => {
+    const load = async () => {
       try {
         const idToken = await user.getIdToken();
-        const r = await fetch(`/api/review-status?ids=${encodeURIComponent(ids)}`, {
-          headers: { Authorization: 'Bearer ' + idToken }
-        });
+        const r = await fetch('/api/my-itineraries', { headers: { Authorization: 'Bearer ' + idToken } });
         if (!r.ok) return;
         const data = await r.json();
-        if (cancelled) return;
-        if (data?.statuses) setAirtableStatuses(data.statuses);
-        if (data?.explanations) setApprovedExplanations(data.explanations);
+        if (cancelled || !Array.isArray(data?.items)) return;
+        const statuses: Record<string, string> = {};
+        const explanations: Record<string, string> = {};
+        const items: SavedItinerary[] = data.items.map((it: any) => {
+          statuses[it.id] = it.status;
+          if (it.approved_explanation) explanations[it.id] = it.approved_explanation;
+          const parts = String(it.summary || '').split(' · ');
+          const nightsMatch = String(it.summary || '').match(/(\d+)\s*nights?/i);
+          return {
+            id: it.id,
+            user_id: user.uid,
+            request_text: it.request_text,
+            response_text: it.response_text,
+            destination_ids: parts[0] || '',
+            destination_name: parts[0] || 'Custom Getaway',
+            nights: nightsMatch ? parseInt(nightsMatch[1], 10) : undefined,
+            review_status: it.status,
+            created_at: it.created_at,
+            source: 'log'
+          } as SavedItinerary;
+        });
+        setAirtableStatuses(statuses);
+        setApprovedExplanations(explanations);
+        setLogItems(items);
       } catch (err: any) {
-        console.warn('[Review Status Fetch Notice]:', err?.message);
+        console.warn('[My Itineraries Fetch Notice]:', err?.message);
       }
-    })();
-    return () => { cancelled = true; };
-  }, [itineraries, user]);
+    };
+    load();
+    const timer = setInterval(load, 60000); // refresh review status every minute
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [user, itineraries.length]);
+
+  // Saved trips (Firestore) first-class; add Airtable-logged itineraries that were never saved.
+  const savedIds = new Set(itineraries.map(i => i.id));
+  const allItems: SavedItinerary[] = [
+    ...itineraries.map(i => ({ ...i, source: 'saved' as const })),
+    ...logItems.filter(i => !savedIds.has(i.id))
+  ].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
 
   const handleDelete = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -191,7 +220,7 @@ export const MyTripsView: React.FC<MyTripsViewProps> = ({ onStartNewChat }) => {
     }
   };
 
-  const filteredItems = itineraries.filter((item) => {
+  const filteredItems = allItems.filter((item) => {
     const atStatus = airtableStatuses[item.id];
     const isApproved = atStatus === 'Approved' || atStatus === 'Reviewed' || item.review_status === 'Auto-checked (no flags)' || item.review_status === 'Auto-approved (no flags)';
     if (filter === 'approved') return isApproved;
@@ -219,7 +248,7 @@ export const MyTripsView: React.FC<MyTripsViewProps> = ({ onStartNewChat }) => {
             <h2 className="text-xl font-bold text-slate-900">My Saved Trips</h2>
           </div>
           <p className="text-xs text-slate-500 mt-1">
-            Your personal saved travel plans and verified evidence cards, accessible anytime you log in.
+            Every itinerary planned for you, with its human-review status. Saved trips can also be shared or deleted.
           </p>
         </div>
 
@@ -231,7 +260,7 @@ export const MyTripsView: React.FC<MyTripsViewProps> = ({ onStartNewChat }) => {
               filter === 'all' ? 'bg-white text-slate-900 shadow-2xs font-semibold' : 'text-slate-500 hover:text-slate-900'
             }`}
           >
-            All ({itineraries.length})
+            All ({allItems.length})
           </button>
           <button
             onClick={() => setFilter('approved')}
@@ -321,7 +350,12 @@ export const MyTripsView: React.FC<MyTripsViewProps> = ({ onStartNewChat }) => {
                         <CheckCircle2 className="w-3 h-3 text-emerald-600" />
                         <span>Reviewed ✓</span>
                       </span>
-                    ) : isPendingOrFlagged ? (
+                    ) : atStatus === 'Rejected' ? (
+                      <span className="inline-flex items-center gap-1 text-[11px] font-semibold bg-rose-50 text-rose-700 border border-rose-200 px-2.5 py-0.5 rounded-full">
+                        <AlertTriangle className="w-3 h-3 text-rose-600" />
+                        <span>Not approved by reviewer</span>
+                      </span>
+                    ) : isPendingOrFlagged || item.source === 'log' ? (
                       <span className="inline-flex items-center gap-1 text-[11px] font-semibold bg-amber-50 text-amber-700 border border-amber-200 px-2.5 py-0.5 rounded-full">
                         <Clock className="w-3 h-3 text-amber-600" />
                         <span>Awaiting human review</span>
@@ -330,6 +364,12 @@ export const MyTripsView: React.FC<MyTripsViewProps> = ({ onStartNewChat }) => {
                       <span className="inline-flex items-center gap-1 text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-0.5 rounded-full">
                         <CheckCircle2 className="w-3 h-3 text-emerald-600" />
                         <span>Auto-checked (no flags)</span>
+                      </span>
+                    )}
+
+                    {item.source === 'log' && (
+                      <span className="inline-flex items-center text-[11px] font-medium bg-slate-100 text-slate-600 border border-slate-200 px-2 py-0.5 rounded-full">
+                        Not saved
                       </span>
                     )}
 
@@ -350,7 +390,8 @@ export const MyTripsView: React.FC<MyTripsViewProps> = ({ onStartNewChat }) => {
                 </div>
 
                 <div className="flex items-center gap-1.5 sm:gap-2 self-end sm:self-center shrink-0">
-                  {/* Share Public Read-Only Link */}
+                  {/* Share Public Read-Only Link (saved trips only) */}
+                  {item.source !== 'log' && (
                   <button
                     onClick={(e) => handleShareItinerary(item, e)}
                     className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-semibold transition-all border shadow-2xs cursor-pointer ${
@@ -372,6 +413,7 @@ export const MyTripsView: React.FC<MyTripsViewProps> = ({ onStartNewChat }) => {
                       </>
                     )}
                   </button>
+                  )}
 
                   {/* Export PDF */}
                   <button
@@ -400,6 +442,7 @@ export const MyTripsView: React.FC<MyTripsViewProps> = ({ onStartNewChat }) => {
                     )}
                   </button>
 
+                  {item.source !== 'log' && (
                   <button
                     onClick={(e) => handleDelete(item.id, e)}
                     className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
@@ -407,6 +450,7 @@ export const MyTripsView: React.FC<MyTripsViewProps> = ({ onStartNewChat }) => {
                   >
                     <Trash2 className="w-4 h-4" />
                   </button>
+                  )}
 
                   <div className="p-1 text-slate-400">
                     {isExpanded ? <ChevronUp className="w-5 h-5" /> : <ChevronDown className="w-5 h-5" />}

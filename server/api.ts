@@ -267,6 +267,65 @@ export async function handleApiRequest(
       return true;
     }
 
+    // 6. GET /api/my-itineraries — the signed-in user's itineraries from Airtable Itinerary_Log
+    // (every itinerary generated for them, saved or not) with each one's human-review status.
+    // The approved "why this itinerary" text (final_approved_output) is returned ONLY for rows
+    // a reviewer has Approved; unreviewed AI explanations are never sent to the traveller.
+    if (pathname === '/my-itineraries' && req.method === 'GET') {
+      const auth = await verifyIdToken(req);
+      if (!auth) {
+        sendJson(res, 401, { error: 'Please sign in to view your trips.' });
+        return true;
+      }
+      const pat = process.env.AIRTABLE_PAT;
+      if (!pat) {
+        sendJson(res, 200, { items: [] });
+        return true;
+      }
+      try {
+        const params = new URLSearchParams();
+        params.set('filterByFormula', `{user_id} = '${auth.uid.replace(/'/g, "\\'")}'`);
+        for (const f of ['Name', 'Timestamp', 'Itinerary Summary', 'trip_request', 'generated_recommendation', 'estimated_cost', 'Review Status', 'final_approved_output']) {
+          params.append('fields[]', f);
+        }
+        params.append('sort[0][field]', 'Timestamp');
+        params.append('sort[0][direction]', 'desc');
+        params.set('pageSize', '100');
+        const atRes = await fetch(`https://api.airtable.com/v0/applFLKlGXGMP5D8U/tbl60eR9auEDeZhpO?${params.toString()}`, {
+          headers: { Authorization: `Bearer ${pat}` }
+        });
+        if (!atRes.ok) {
+          console.warn('[My Itineraries] Airtable responded', atRes.status);
+          sendJson(res, 200, { items: [] });
+          return true;
+        }
+        const atData: any = await atRes.json();
+        const items = (atData.records || []).map((rec: any) => {
+          const f = rec.fields || {};
+          const rawStatus = f['Review Status'];
+          const status = (typeof rawStatus === 'string' ? rawStatus : rawStatus?.name) || 'Pending';
+          const approved = status === 'Approved' && typeof f.final_approved_output === 'string' ? f.final_approved_output.trim() : '';
+          return {
+            id: String(f.Name || rec.id),
+            record_id: rec.id,
+            created_at: f.Timestamp || rec.createdTime,
+            summary: f['Itinerary Summary'] || '',
+            request_text: f.trip_request || '',
+            response_text: f.generated_recommendation || '',
+            estimated_cost: typeof f.estimated_cost === 'number' ? f.estimated_cost : null,
+            status,
+            approved_explanation: approved
+          };
+        });
+        sendJson(res, 200, { items });
+        return true;
+      } catch (err: any) {
+        console.error('[My Itineraries Error]:', err?.message);
+        sendJson(res, 200, { items: [] });
+        return true;
+      }
+    }
+
     // 5. GET /api/review-status?ids=itin_...,itin_... (Requirement 8)
     // Signed-in owners only. Returns each saved trip's human-review status from Airtable
     // Itinerary_Log and, ONLY when a reviewer has set Review Status = Approved, the approved
