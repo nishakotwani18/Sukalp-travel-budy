@@ -81,6 +81,8 @@ export const MyTripsView: React.FC<MyTripsViewProps> = ({ onStartNewChat }) => {
   const [pdfSuccessId, setPdfSuccessId] = useState<string | null>(null);
   const [sharedToastId, setSharedToastId] = useState<string | null>(null);
   const [airtableStatuses, setAirtableStatuses] = useState<Record<string, string>>({});
+  // Approved "why this itinerary" text per saved trip. Only ever filled for Approved rows.
+  const [approvedExplanations, setApprovedExplanations] = useState<Record<string, string>>({});
 
   useEffect(() => {
     if (!user) {
@@ -119,19 +121,28 @@ export const MyTripsView: React.FC<MyTripsViewProps> = ({ onStartNewChat }) => {
     return () => unsubscribe();
   }, [user]);
 
-  // Requirement 8: Poll /api/review-status?ids= to read live reviewer status from Airtable
+  // Requirement 8: read live reviewer status (and the approved explanation) from Airtable
   useEffect(() => {
-    if (itineraries.length === 0) return;
+    if (itineraries.length === 0 || !user) return;
+    let cancelled = false;
     const ids = itineraries.map(i => i.id).join(',');
-    fetch(`/api/review-status?ids=${encodeURIComponent(ids)}`)
-      .then(r => r.json())
-      .then(data => {
-        if (data?.statuses) {
-          setAirtableStatuses(data.statuses);
-        }
-      })
-      .catch(err => console.warn('[Review Status Fetch Notice]:', err?.message));
-  }, [itineraries]);
+    (async () => {
+      try {
+        const idToken = await user.getIdToken();
+        const r = await fetch(`/api/review-status?ids=${encodeURIComponent(ids)}`, {
+          headers: { Authorization: 'Bearer ' + idToken }
+        });
+        if (!r.ok) return;
+        const data = await r.json();
+        if (cancelled) return;
+        if (data?.statuses) setAirtableStatuses(data.statuses);
+        if (data?.explanations) setApprovedExplanations(data.explanations);
+      } catch (err: any) {
+        console.warn('[Review Status Fetch Notice]:', err?.message);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [itineraries, user]);
 
   const handleDelete = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -433,7 +444,31 @@ export const MyTripsView: React.FC<MyTripsViewProps> = ({ onStartNewChat }) => {
                       </button>
                     </div>
                   </div>
-                  <EvidenceCardViewer text={item.response_text} reviewStatus={item.review_status} explanation={item.ai_explanation} />
+                  {/* "Why this itinerary": shown only after a human reviewer approves it */}
+                  <div className={`mb-4 rounded-xl border px-4 py-3 ${approvedExplanations[item.id] ? 'border-emerald-200 bg-emerald-50/60' : 'border-amber-200 bg-amber-50/60'}`}>
+                    <div className={`text-[11px] font-semibold uppercase tracking-wide mb-1 ${approvedExplanations[item.id] ? 'text-emerald-700' : 'text-amber-700'}`}>
+                      Why this itinerary
+                    </div>
+                    {approvedExplanations[item.id] ? (
+                      <>
+                        <p className="text-sm text-slate-800 leading-relaxed">{approvedExplanations[item.id]}</p>
+                        <p className="mt-1 text-[11px] text-emerald-700 flex items-center gap-1">
+                          <CheckCircle2 className="w-3 h-3" />
+                          <span>Reviewed and approved by our team</span>
+                        </p>
+                      </>
+                    ) : (
+                      <p className="text-sm text-amber-800 flex items-center gap-1.5">
+                        <Clock className="w-3.5 h-3.5" />
+                        <span>Explanation under review. It will appear here once a reviewer approves it.</span>
+                      </p>
+                    )}
+                  </div>
+                  <EvidenceCardViewer
+                    text={item.response_text}
+                    reviewStatus={approvedExplanations[item.id] ? 'Approved' : (airtableStatuses[item.id] || item.review_status)}
+                    explanation={approvedExplanations[item.id]}
+                  />
                 </div>
               )}
             </div>

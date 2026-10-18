@@ -426,6 +426,7 @@ export async function writeItineraryLogToAirtable(
 
 export async function forwardItineraryToN8n(payload: {
   event?: 'generated' | 'saved';
+  itinerary_id?: string;
   trip_request: string;
   generated_recommendation: string;
   evidence_source_reviews?: string;

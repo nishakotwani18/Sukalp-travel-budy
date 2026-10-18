@@ -282,6 +282,7 @@ export async function handleApiRequest(
 
       const queued = await forwardItineraryToN8n({
         event: 'saved',
+        itinerary_id: itineraryId,
         trip_request: tripRequest,
         generated_recommendation: itineraryText,
         evidence_source_reviews: evidence.evidence_source_reviews || '',
@@ -311,48 +312,70 @@ export async function handleApiRequest(
     }
 
     // 5. GET /api/review-status?ids=itin_...,itin_... (Requirement 8)
+    // Signed-in owners only. Returns each saved trip's human-review status from Airtable
+    // Itinerary_Log and, ONLY when a reviewer has set Review Status = Approved, the approved
+    // "why this itinerary" text (final_approved_output). Unreviewed AI text is never returned.
     if (pathname === '/review-status' && req.method === 'GET') {
+      const auth = await verifyIdToken(req);
+      if (!auth) {
+        sendJson(res, 401, { error: 'Please sign in to view review status.' });
+        return true;
+      }
       const parsedUrl = new URL(url, 'http://localhost');
       const rawIds = parsedUrl.searchParams.get('ids') || '';
-      const idList = rawIds.split(',').map(s => s.trim()).filter(Boolean).slice(0, 50);
+      const idList = rawIds.split(',').map(s => s.trim()).filter(id => ITINERARY_ID_PATTERN.test(id)).slice(0, 50);
 
       if (idList.length === 0) {
-        sendJson(res, 200, { statuses: {} });
+        sendJson(res, 200, { statuses: {}, explanations: {} });
         return true;
       }
 
       const pat = process.env.AIRTABLE_PAT;
       if (!pat) {
-        sendJson(res, 200, { statuses: {} });
+        sendJson(res, 200, { statuses: {}, explanations: {} });
         return true;
       }
 
       try {
-        const clauses = idList.map(id => `{Name} = '${id.replace(/'/g, "\\'")}'`);
-        const formula = clauses.length === 1 ? clauses[0] : `OR(${clauses.join(', ')})`;
-        const airtableUrl = `https://api.airtable.com/v0/applFLKlGXGMP5D8U/tbl60eR9auEDeZhpO?filterByFormula=${encodeURIComponent(formula)}`;
+        const nameClauses = idList.map(id => `{Name} = '${id}'`);
+        const nameMatch = nameClauses.length === 1 ? nameClauses[0] : `OR(${nameClauses.join(', ')})`;
+        // Owner check: only rows logged for this signed-in user's uid are returned.
+        const formula = `AND(${nameMatch}, {user_id} = '${auth.uid.replace(/'/g, "\\'")}')`;
+        const params = new URLSearchParams();
+        params.set('filterByFormula', formula);
+        params.append('fields[]', 'Name');
+        params.append('fields[]', 'Review Status');
+        params.append('fields[]', 'final_approved_output');
+        const airtableUrl = `https://api.airtable.com/v0/applFLKlGXGMP5D8U/tbl60eR9auEDeZhpO?${params.toString()}`;
 
         const atRes = await fetch(airtableUrl, {
           headers: { Authorization: `Bearer ${pat}` }
         });
 
         const statuses: Record<string, string> = {};
+        const explanations: Record<string, string> = {};
         if (atRes.ok) {
-          const atData = await atRes.json();
+          const atData: any = await atRes.json();
           for (const rec of (atData.records || [])) {
             const name = rec.fields?.Name;
-            const revStatus = rec.fields?.review_status;
-            if (name && revStatus) {
-              statuses[name] = revStatus;
+            const rawStatus = rec.fields?.['Review Status'];
+            const revStatus = typeof rawStatus === 'string' ? rawStatus : rawStatus?.name;
+            if (!name || !revStatus) continue;
+            statuses[name] = revStatus;
+            const approvedText = rec.fields?.final_approved_output;
+            if (revStatus === 'Approved' && typeof approvedText === 'string' && approvedText.trim()) {
+              explanations[name] = approvedText.trim();
             }
           }
+        } else {
+          console.warn('[Review Status] Airtable responded', atRes.status);
         }
 
-        sendJson(res, 200, { statuses });
+        sendJson(res, 200, { statuses, explanations });
         return true;
       } catch (err: any) {
         console.error('[Review Status Fetch Error]:', err?.message);
-        sendJson(res, 200, { statuses: {} });
+        sendJson(res, 200, { statuses: {}, explanations: {} });
         return true;
       }
     }
