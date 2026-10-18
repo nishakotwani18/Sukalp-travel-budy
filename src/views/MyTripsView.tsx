@@ -200,6 +200,8 @@ export const MyTripsView: React.FC<MyTripsViewProps> = ({ onStartNewChat }) => {
 
   const handleShareItinerary = async (item: SavedItinerary, e: React.MouseEvent) => {
     e.stopPropagation();
+    // Bias kill switch (Part 4, 4.5 Contain): plans flagged at generation cannot be shared.
+    if (item.share_disabled) return;
     try {
       if (!item.is_public) {
         await updateDoc(doc(db, 'saved_itineraries', item.id), {
@@ -391,7 +393,7 @@ export const MyTripsView: React.FC<MyTripsViewProps> = ({ onStartNewChat }) => {
 
                 <div className="flex items-center gap-1.5 sm:gap-2 self-end sm:self-center shrink-0">
                   {/* Share Public Read-Only Link (saved trips only) */}
-                  {item.source !== 'log' && (
+                  {item.source !== 'log' && !item.share_disabled && (
                   <button
                     onClick={(e) => handleShareItinerary(item, e)}
                     className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-semibold transition-all border shadow-2xs cursor-pointer ${
@@ -466,6 +468,7 @@ export const MyTripsView: React.FC<MyTripsViewProps> = ({ onStartNewChat }) => {
                       Verified AI Response
                     </span>
                     <div className="flex items-center gap-2">
+                      {!item.share_disabled && (
                       <button
                         onClick={(e) => handleShareItinerary(item, e)}
                         className="flex items-center gap-1.5 px-3 py-1.5 bg-white hover:bg-slate-50 text-slate-700 rounded-xl text-xs font-semibold border border-slate-200 shadow-2xs transition-all cursor-pointer"
@@ -477,6 +480,7 @@ export const MyTripsView: React.FC<MyTripsViewProps> = ({ onStartNewChat }) => {
                         )}
                         <span>{sharedToastId === item.id ? 'Public Link Copied!' : 'Share Read-Only Link'}</span>
                       </button>
+                      )}
 
                       <button
                         onClick={(e) => handleExportPdf(item, e)}

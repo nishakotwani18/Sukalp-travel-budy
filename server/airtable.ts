@@ -274,7 +274,14 @@ export const ITINERARY_LOG_FIELD_IDS = {
   user_id: 'fld4DG4f6NcfFDadG',
   itinerary_summary: 'fldRvwVkOXWsXic1J',
   ai_explanation: 'fld4MbcdSl2a0duWF',
-  persona: 'fldjIin3SlrzGCLq1'
+  persona: 'fldjIin3SlrzGCLq1',
+  shortlist_destination_ids: 'fld1DN42vIhv5tYGz',
+  popularity_tier: 'fldig9bSbFQJrTS1U',
+  shortlist_nonpopular_slots: 'fldWp2JVy4k1lPWj8',
+  shortlist_slots: 'fld21Wvdc5e2CByCv',
+  eligible_nonpopular_share: 'fldr6SzqG5giuEuMn',
+  destination_named: 'fldIELgn0ai64M89Y',
+  notes: 'fldlrX5PlFAnAG2yC'
 } as const;
 
 export interface WriteItineraryLogPayload {
@@ -505,6 +512,15 @@ export async function logGeneratedItinerary(payload: {
   alternatives?: string;
   safety_notes?: string;
   vegetarian_notes?: string;
+  bias?: {
+    destination_named: boolean;
+    popularity_tier: string | null;
+    shortlist_destination_ids: string[];
+    shortlist_slots: number;
+    shortlist_nonpopular_slots: number;
+    eligible_nonpopular_share: number | null;
+    kill_switch: boolean;
+  };
 }): Promise<string | null> {
   const pat = process.env.AIRTABLE_PAT;
   if (!pat) {
@@ -544,6 +560,17 @@ export async function logGeneratedItinerary(payload: {
     [ITINERARY_LOG_FIELD_IDS.review_status]: 'Pending'
   };
   if (persona.length) fields[ITINERARY_LOG_FIELD_IDS.persona] = persona;
+  if (payload.bias) {
+    const b = payload.bias;
+    fields[ITINERARY_LOG_FIELD_IDS.destination_named] = Boolean(b.destination_named);
+    fields[ITINERARY_LOG_FIELD_IDS.shortlist_destination_ids] = b.shortlist_destination_ids.join(', ');
+    fields[ITINERARY_LOG_FIELD_IDS.shortlist_slots] = b.shortlist_slots;
+    fields[ITINERARY_LOG_FIELD_IDS.shortlist_nonpopular_slots] = b.shortlist_nonpopular_slots;
+    if (b.eligible_nonpopular_share != null) fields[ITINERARY_LOG_FIELD_IDS.eligible_nonpopular_share] = b.eligible_nonpopular_share;
+    if (b.popularity_tier && ['popular', 'known', 'offbeat'].includes(b.popularity_tier)) {
+      fields[ITINERARY_LOG_FIELD_IDS.popularity_tier] = b.popularity_tier;
+    }
+  }
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 8000);

@@ -33,7 +33,8 @@ service cloud.firestore {
 
     // saved_itineraries collection
     match /saved_itineraries/{itineraryId} {
-      allow get: if resource.data.is_public == true || (isSignedIn() && resource.data.user_id == request.auth.uid);
+      allow get: if (resource.data.is_public == true && resource.data.get('share_disabled', false) != true)
+        || (isSignedIn() && resource.data.user_id == request.auth.uid);
       allow list: if isSignedIn() && resource.data.user_id == request.auth.uid;
       allow create: if isSignedIn()
         && request.resource.data.user_id == request.auth.uid
@@ -42,7 +43,8 @@ service cloud.firestore {
         && request.resource.data.response_text is string;
       allow update: if isSignedIn()
         && resource.data.user_id == request.auth.uid
-        && request.resource.data.user_id == request.auth.uid;
+        && request.resource.data.user_id == request.auth.uid
+        && request.resource.data.get('share_disabled', false) == resource.data.get('share_disabled', false);
       allow delete: if isSignedIn() && resource.data.user_id == request.auth.uid;
     }
 

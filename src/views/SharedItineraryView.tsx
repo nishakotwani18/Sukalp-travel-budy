@@ -45,6 +45,11 @@ export const SharedItineraryView: React.FC<SharedItineraryViewProps> = ({ shareI
         }
 
         const data = docSnap.data() as SavedItinerary;
+        if (data.share_disabled) {
+          setError('This plan is not available for sharing right now.');
+          setLoading(false);
+          return;
+        }
         setItinerary({
           ...data,
           id: docSnap.id

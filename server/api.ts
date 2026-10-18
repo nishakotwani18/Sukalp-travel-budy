@@ -220,7 +220,8 @@ export async function handleApiRequest(
           assumptions: (ij?.assumptions || []).join('; '),
           alternatives: (ij?.alternatives || []).map((a: any) => a.destination_name).join(', '),
           safety_notes: ij?.safety_notes || '',
-          vegetarian_notes: ij?.food_notes || ''
+          vegetarian_notes: ij?.food_notes || '',
+          bias: result.bias
         });
       }
 
