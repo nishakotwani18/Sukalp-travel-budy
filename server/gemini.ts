@@ -1497,6 +1497,8 @@ export function verifyAndFormatOutput(
     const v = stayReviews.length;
     (h as any).reviewCount = v;
     (h as any).hasReviews = v > 0;
+    // A review signal is only meaningful when the Reviews table holds reviews for this stay.
+    if (v === 0) h.review_signal = 'No guest reviews in catalogue';
 
     if (v > 0) {
       const reviews90d = stayReviews.filter(r => {
@@ -2119,13 +2121,15 @@ export async function processChatWithGemini(
   }
 
   // 4. Candidate Retrieval & Bias-Aware Ranking (in server code)
-  const { shortlistDestinations, eligibleHotels, hotelReviews, noMatch } = rankCandidates(
+  const ranked = rankCandidates(
     catalogue.destinations,
     catalogue.hotels,
     catalogue.reviews,
     slots,
     cleanText.toLowerCase()
   );
+  let shortlistDestinations = ranked.shortlistDestinations;
+  const { eligibleHotels, hotelReviews, noMatch } = ranked;
 
   if (shortlistDestinations.length === 0) {
     return {
@@ -2140,16 +2144,72 @@ export async function processChatWithGemini(
     };
   }
 
-  const primaryDest = shortlistDestinations[0];
-  const allDestHotels = catalogue.hotels.filter(h =>
-    (h.destination_id || []).includes(primaryDest.id) ||
-    (h.destination_id || []).includes(primaryDest.destination_id) ||
-    (primaryDest.Hotels || []).includes(h.id)
-  );
-
-  const pool = allDestHotels.length > 0 ? allDestHotels : (eligibleHotels[primaryDest.destination_id] || []);
   const requiresElder = isElderOrAccessibilityRequested(cleanText, slots);
-  const eligibleHotelsForDest = requiresElder ? pool.filter(isStayElderValid) : pool;
+
+  // Group maths: rooms = ceil(travellers ÷ 2). Total = rooms × nights × nightly rate + transport + food + activities. Per-person = total ÷ travellers.
+  const userBudget = slots.budget_basis === 'per_person'
+    ? (slots.budget_total_inr ?? 30000) * (slots.traveller_count || 2)
+    : (slots.budget_total_inr ?? 30000);
+
+  const travellerCount = slots.traveller_count || 2;
+  const rooms = Math.ceil(travellerCount / 2);
+  const nights = slots.nights > 0 ? slots.nights : 3;
+
+  // Everything the budget guard needs for one destination, computed by the server from the catalogue.
+  // floorCost = rooms × nights × cheapest eligible nightly rate + the server's non-stay estimate
+  // (₹1,500 per person per night domestic, ₹6,000 international).
+  const destBudgetFacts = (d: DestinationRecord) => {
+    const all = catalogue.hotels.filter(h =>
+      (h.destination_id || []).includes(d.id) ||
+      (h.destination_id || []).includes(d.destination_id) ||
+      (d.Hotels || []).includes(h.id)
+    );
+    const pool = all.length > 0 ? all : (eligibleHotels[d.destination_id] || []);
+    const eligible = requiresElder ? pool.filter(isStayElderValid) : pool;
+    const cheapest = eligible.slice().sort((a, b) => (a.price_per_night_inr || 0) - (b.price_per_night_inr || 0))[0];
+    const isDom = isIndianState(d.state);
+    const nonStayFloor = (isDom ? 1500 : 6000) * travellerCount * nights;
+    const floorCost = cheapest ? rooms * nights * (cheapest.price_per_night_inr || 2000) + nonStayFloor : Infinity;
+    return { pool, eligible, cheapest, isDom, nonStayFloor, floorCost };
+  };
+
+  // Alternatives the guard may offer or switch to: only shortlisted destinations (they already passed the
+  // scope, region, avoid and accessibility filters), same state or country as the top match first.
+  const fittingAlternative = (exclude: DestinationRecord) => {
+    const candidates = shortlistDestinations
+      .filter(d => d.destination_id !== exclude.destination_id)
+      .map(d => ({ dest: d, facts: destBudgetFacts(d) }))
+      .filter(c => c.facts.floorCost <= userBudget);
+    const sameState = (d: DestinationRecord) => (d.state || '').toLowerCase() === (exclude.state || '').toLowerCase() ? 0 : 1;
+    candidates.sort((a, b) => sameState(a.dest) - sameState(b.dest));
+    return candidates[0] || null;
+  };
+
+  let primaryDest = shortlistDestinations[0];
+  let facts = destBudgetFacts(primaryDest);
+  let budgetSwitchNote: string | null = null;
+
+  // Hard server-side budget guard BEFORE generating the itinerary. If the top match cannot fit the budget
+  // even at its cheapest eligible stay, switch to the next shortlisted destination that can, rather than refusing.
+  if (facts.floorCost > userBudget || (requiresElder && facts.eligible.length === 0)) {
+    const alt = fittingAlternative(primaryDest);
+    if (alt) {
+      const reason = (requiresElder && facts.eligible.length === 0)
+        ? `has no verified elder-friendly stay in our catalogue`
+        : `needs at least about ₹${Math.round(facts.floorCost).toLocaleString('en-IN')}`;
+      console.log(`[Pre-Gen Budget Guard] ${primaryDest.destination_name} ${reason}; switching to ${alt.dest.destination_name}.`);
+      budgetSwitchNote = `${primaryDest.destination_name} ${reason}, so this plan uses ${alt.dest.destination_name}, which fits your ₹${userBudget.toLocaleString('en-IN')} budget.`;
+      shortlistDestinations = [alt.dest, ...shortlistDestinations.filter(d => d.destination_id !== alt.dest.destination_id)];
+      primaryDest = alt.dest;
+      facts = alt.facts;
+    }
+  }
+
+  const pool = facts.pool;
+  const eligibleHotelsForDest = facts.eligible;
+  const cheapestEligibleHotel = facts.cheapest;
+  const isDom = facts.isDom;
+  const minFeasibleCost = facts.floorCost;
 
   // Pre-generation check: if elder requested and no valid stays exist, return clear message without generating
   if (requiresElder && eligibleHotelsForDest.length === 0) {
@@ -2165,56 +2225,12 @@ export async function processChatWithGemini(
     };
   }
 
-  // Group maths: rooms = ceil(travellers ÷ 2). Total = rooms × nights × nightly rate + transport + food + activities. Per-person = total ÷ travellers.
-  const userBudget = slots.budget_basis === 'per_person'
-    ? (slots.budget_total_inr ?? 30000) * (slots.traveller_count || 2)
-    : (slots.budget_total_inr ?? 30000);
-
-  const travellerCount = slots.traveller_count || 2;
-  const rooms = Math.ceil(travellerCount / 2);
-  const nights = slots.nights > 0 ? slots.nights : 3;
-
-  // Hard server-side budget guard BEFORE generating itinerary:
-  // Compute minimum feasible cost from catalogue: for each day, use cheapest eligible stay, transport, food, and activities for party size, then sum across nights.
-  const cheapestEligibleHotel = eligibleHotelsForDest.slice().sort((a, b) => (a.price_per_night_inr || 0) - (b.price_per_night_inr || 0))[0];
-  const minStayRate = cheapestEligibleHotel?.price_per_night_inr || 2000;
-  const minStayTotal = rooms * nights * minStayRate;
-
-  const isDom = isIndianState(primaryDest.state);
-  const estNonStay = (isDom ? 1500 : 6000) * travellerCount * nights;
-  const minTransport = Math.round(estNonStay * 0.3);
-  const minFood = Math.round(estNonStay * 0.5);
-  const minActivities = Math.round(estNonStay * 0.2);
-  const minFeasibleCost = minStayTotal + minTransport + minFood + minActivities;
-
-  // Helper to offer one catalogue destination that fits
-  const findFittingCatalogueDestination = () => {
-    const otherDestinations = catalogue.destinations.filter(d => d.destination_id !== primaryDest.destination_id);
-    for (const d of otherDestinations) {
-      const dHotels = catalogue.hotels.filter(h =>
-        (h.destination_id || []).includes(d.id) ||
-        (h.destination_id || []).includes(d.destination_id) ||
-        (d.Hotels || []).includes(h.id)
-      );
-      if (dHotels.length === 0) continue;
-      const cheapestH = dHotels.slice().sort((a, b) => (a.price_per_night_inr || 0) - (b.price_per_night_inr || 0))[0];
-      const dStayTotal = rooms * nights * (cheapestH.price_per_night_inr || 2000);
-      const dIsDom = isIndianState(d.state);
-      const dEstNonStay = (dIsDom ? 1500 : 6000) * travellerCount * nights;
-      const dMinCost = dStayTotal + dEstNonStay;
-      if (dMinCost <= userBudget) {
-        return { dest: d, minCost: dMinCost };
-      }
-    }
-    return null;
-  };
-
-  // If the minimum exceeds the stated budget, return clear message and do not generate an itinerary
-  if (minFeasibleCost > userBudget) {
-    console.log(`[Pre-Gen Budget Guard] Min feasible cost ₹${minFeasibleCost} exceeds stated budget ₹${userBudget}. Aborting generation.`);
-    const fitting = findFittingCatalogueDestination();
-    const offer = fitting ? ` We recommend considering ${fitting.dest.destination_name} (minimum cost about ₹${fitting.minCost.toLocaleString('en-IN')}) which fits within your budget.` : '';
-    const clearMessage = `No verified plan fits ₹${userBudget.toLocaleString('en-IN')}; the minimum is about ₹${minFeasibleCost.toLocaleString('en-IN')}.${offer}`;
+  // Message used when no shortlisted plan fits. It states the true catalogue minimum (not the model's plan total)
+  // and only offers a shortlisted destination that passed the same filters.
+  const budgetRefusal = () => {
+    const alt = fittingAlternative(primaryDest);
+    const offer = alt ? ` ${alt.dest.destination_name} fits (from about ₹${Math.round(alt.facts.floorCost).toLocaleString('en-IN')}).` : ' Try a higher budget, fewer nights or a smaller party.';
+    const clearMessage = `No verified plan in ${primaryDest.destination_name} fits ₹${userBudget.toLocaleString('en-IN')}; the lowest verified cost is about ₹${Math.round(minFeasibleCost).toLocaleString('en-IN')} for ${travellerCount} traveller(s), ${nights} night(s), ${rooms} room(s).${offer}`;
     return {
       responseText: clearMessage,
       destinationIds: [primaryDest.destination_id],
@@ -2225,6 +2241,12 @@ export async function processChatWithGemini(
       catalogueRowsSentCount: 0,
       badges: [`Budget Alert: No verified plan fits ₹${userBudget.toLocaleString('en-IN')}`]
     };
+  };
+
+  // If even the cheapest verified plan exceeds the stated budget, do not generate an itinerary
+  if (minFeasibleCost > userBudget) {
+    console.log(`[Pre-Gen Budget Guard] Min feasible cost ₹${minFeasibleCost} exceeds stated budget ₹${userBudget}. Aborting generation.`);
+    return budgetRefusal();
   }
 
   // 5. Itinerary Generation (Call 2)
@@ -2298,8 +2320,31 @@ export async function processChatWithGemini(
     itin.cost.within_budget = itin.cost.total_inr <= userBudget;
   };
 
+  // The model's own transport, food and activity figures are estimates. When they push a plan over budget
+  // but the stay plus the server's non-stay floor fits, scale those three figures down to the budget instead of
+  // refusing a plan that the catalogue can support.
+  const fitNonStayToBudget = (itin: GeneratedItineraryJson): boolean => {
+    const c = itin.cost;
+    const nonStay = (c.local_transport_inr || 0) + (c.food_inr || 0) + (c.activities_inr || 0);
+    const room = userBudget - c.stay_inr;
+    const floor = (isDom ? 1500 : 6000) * travellerCount * nights;
+    if (c.total_inr <= userBudget || room < floor || nonStay <= 0) return false;
+    const factor = room / nonStay;
+    c.local_transport_inr = Math.floor((c.local_transport_inr || 0) * factor / 100) * 100;
+    c.food_inr = Math.floor((c.food_inr || 0) * factor / 100) * 100;
+    c.activities_inr = Math.floor((c.activities_inr || 0) * factor / 100) * 100;
+    c.total_inr = c.stay_inr + c.local_transport_inr + c.food_inr + c.activities_inr;
+    c.per_person_inr = travellerCount === 1 ? c.total_inr : Math.round(c.total_inr / travellerCount);
+    c.within_budget = c.total_inr <= userBudget;
+    const note = `Local transport, food and activities are budgeted at ₹${(c.local_transport_inr + c.food_inr + c.activities_inr).toLocaleString('en-IN')} in total to keep the plan within ₹${userBudget.toLocaleString('en-IN')}.`;
+    itin.assumptions = [...(itin.assumptions || []), note];
+    console.log(`[Budget Guard] Scaled non-stay costs by ${factor.toFixed(2)} to fit budget ₹${userBudget}.`);
+    return true;
+  };
+
   // Recompute total from components on the server, not from model's text:
   calculateCost(itineraryJson);
+  fitNonStayToBudget(itineraryJson);
 
   // If recomputed total exceeds budget, regenerate once with cheapest eligible options
   if (itineraryJson.cost.total_inr > userBudget) {
@@ -2361,22 +2406,12 @@ export async function processChatWithGemini(
       }
     }
 
+    fitNonStayToBudget(itineraryJson);
+
     // If it still exceeds, return the message instead of the plan. Never display a plan whose total is over budget. Keep the existing Budget Alert text only for the message path.
     if (itineraryJson.cost.total_inr > userBudget) {
       console.log(`[Budget Guard] After regeneration, total ${itineraryJson.cost.total_inr} still exceeds budget ${userBudget}. Returning clear message instead of plan.`);
-      const fitting = findFittingCatalogueDestination();
-      const offer = fitting ? ` We recommend considering ${fitting.dest.destination_name} (minimum cost about ₹${fitting.minCost.toLocaleString('en-IN')}) which fits within your budget.` : '';
-      const clearMessage = `No verified plan fits ₹${userBudget.toLocaleString('en-IN')}; the minimum is about ₹${itineraryJson.cost.total_inr.toLocaleString('en-IN')}.${offer}`;
-      return {
-        responseText: clearMessage,
-        destinationIds: [primaryDest.destination_id],
-        matchedDestinations: shortlistDestinations,
-        matchedHotels: cheapestEligibleHotel ? [cheapestEligibleHotel] : [],
-        reviewStatus: hasInjection ? 'Awaiting human review' : 'Auto-checked (no flags)',
-        flaggedHotels: [],
-        catalogueRowsSentCount: 0,
-        badges: [`Budget Alert: No verified plan fits ₹${userBudget.toLocaleString('en-IN')}`]
-      };
+      return budgetRefusal();
     }
   }
 
@@ -2404,10 +2439,15 @@ export async function processChatWithGemini(
         }
       }
       calculateCost(regenerated);
-      itineraryJson = regenerated;
+      fitNonStayToBudget(regenerated);
+      if (regenerated.cost.total_inr <= userBudget) itineraryJson = regenerated;
     } catch (err) {
       console.warn('Alternatives regeneration error:', err);
     }
+  }
+
+  if (budgetSwitchNote) {
+    itineraryJson.assumptions = [budgetSwitchNote, ...(itineraryJson.assumptions || [])];
   }
 
   const primaryHotels = eligibleHotels[primaryDest.destination_id] || eligibleHotelsForDest || [];
